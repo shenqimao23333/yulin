@@ -1,0 +1,39 @@
+'use strict';
+window.YL=window.YL||{};
+YL.$=(s,r=document)=>r.querySelector(s);
+YL.store={
+ key:'yizhi-yulin-v1',data:{done:[],motifs:[],chapter:0,cuts:0,audio:true},
+ load(){try{const d=JSON.parse(localStorage.getItem(this.key));if(d&&Array.isArray(d.done)){this.data={...this.data,...d,done:d.done.filter(x=>Number.isInteger(x)&&x>=0&&x<=5)};}}catch{}return this.data;},
+ save(){try{localStorage.setItem(this.key,JSON.stringify(this.data));}catch{}},
+ finish(ch){if(!this.data.done.includes(ch.id))this.data.done.push(ch.id);if(!this.data.motifs.includes(ch.gain))this.data.motifs.push(ch.gain);this.save();},
+ reset(){const audio=this.data.audio;this.data={done:[],motifs:[],chapter:0,cuts:0,audio};this.save();}
+};
+YL.abortError=()=>new DOMException('Chapter cancelled','AbortError');
+YL.Scope=class{
+ constructor(){this.controller=new AbortController();this.signal=this.controller.signal;this.cleanups=[];this.pending=new Set();this.time=0;this.last=performance.now();this.raf=requestAnimationFrame(t=>this.tick(t));}
+ tick(now){if(this.signal.aborted)return;const dt=Math.min(60,now-this.last);this.last=now;if(!YL.game?.paused&&!document.hidden){this.time+=dt;for(const f of [...this.pending])f(dt);}this.raf=requestAnimationFrame(t=>this.tick(t));}
+ cleanup(fn){this.cleanups.push(fn);return fn;}
+ event(node,event,fn,opts={}){node.addEventListener(event,fn,{...opts,signal:this.signal});}
+ promise(setup){return new Promise((resolve,reject)=>{if(this.signal.aborted){reject(YL.abortError());return;}let ended=false;const abort=()=>{if(ended)return;ended=true;reject(YL.abortError());};this.signal.addEventListener('abort',abort,{once:true});const done=v=>{if(ended)return;ended=true;this.signal.removeEventListener('abort',abort);resolve(v);};setup(done);});}
+ animate(ms,update){return this.promise(done=>{let elapsed=0;const f=dt=>{elapsed+=dt;const p=Math.min(1,elapsed/ms);update(p);if(p===1){this.pending.delete(f);done();}};this.pending.add(f);this.cleanup(()=>this.pending.delete(f));update(0);});}
+ wait(ms){return this.animate(ms,()=>{});}
+ dispose(){if(this.signal.aborted)return;cancelAnimationFrame(this.raf);this.controller.abort();for(const f of this.cleanups.splice(0))f();this.pending.clear();}
+};
+YL.audio={
+ ctx:null,master:null,enabled:true,
+ init(){if(this.ctx)return;const Audio=window.AudioContext||window.webkitAudioContext;if(!Audio)return;try{this.ctx=new Audio();this.master=this.ctx.createGain();this.master.gain.value=this.enabled?.5:0;this.master.connect(this.ctx.destination);}catch{}},
+ unlock(){this.init();if(this.ctx?.state==='suspended'&&!YL.game?.paused)this.ctx.resume().catch(()=>{});},
+ toggle(){this.enabled=!this.enabled;YL.store.data.audio=this.enabled;YL.store.save();if(this.master)this.master.gain.setTargetAtTime(this.enabled?.5:0,this.ctx.currentTime,.03);YL.game?.refreshAudio();YL.ui.toast(this.enabled?'音效已开启':'音效已关闭');this.unlock();},
+ pause(v){if(!this.ctx)return;if(v)this.ctx.suspend().catch(()=>{});else this.ctx.resume().catch(()=>{});},
+ tone(f,d=.18,delay=0,vol=.13,type='sine'){if(!this.enabled)return;this.init();if(!this.ctx||this.ctx.state!=='running')return;const t=this.ctx.currentTime+delay,o=this.ctx.createOscillator(),g=this.ctx.createGain();o.type=type;o.frequency.value=f;g.gain.setValueAtTime(.0001,t);g.gain.exponentialRampToValueAtTime(vol,t+.012);g.gain.exponentialRampToValueAtTime(.0001,t+d);o.connect(g);g.connect(this.master);o.start(t);o.stop(t+d+.02);o.onended=()=>{o.disconnect();g.disconnect();};},
+ noise(d=.09,vol=.09){if(!this.enabled)return;this.init();if(!this.ctx||this.ctx.state!=='running')return;const c=this.ctx,b=c.createBuffer(1,Math.ceil(c.sampleRate*d),c.sampleRate),v=b.getChannelData(0);for(let i=0;i<v.length;i++)v[i]=(Math.random()*2-1)*(1-i/v.length);const s=c.createBufferSource(),f=c.createBiquadFilter(),g=c.createGain();s.buffer=b;f.type='highpass';f.frequency.value=1600;g.gain.value=vol;s.connect(f);f.connect(g);g.connect(this.master);s.start();s.onended=()=>{s.disconnect();f.disconnect();g.disconnect();};},
+ tap(){this.tone(660,.09,0,.07);},cut(){this.noise(.065,.065);},snap(){this.tone(880,.18);this.tone(1320,.25,.06,.08);},win(){[523.25,659.25,783.99,1046.5].forEach((f,i)=>this.tone(f,.55,i*.085,.09,'triangle'));},page(){this.noise(.23,.06);}
+};
+YL.ui={
+ timer:0,modalResolve:null,
+ toast(text){if(YL.$('[data-task="cut"]'))return;const n=YL.$('#toast');n.textContent=text;n.classList.add('show');clearTimeout(this.timer);this.timer=setTimeout(()=>n.classList.remove('show'),1700);},
+ closeModal(value){const m=YL.$('#modal');m.hidden=true;m.innerHTML='';YL.game.modalPaused=false;YL.audio.pause(document.hidden);if(this.modalResolve){const r=this.modalResolve;this.modalResolve=null;r(value);}},
+ modal({kicker='',title='',body='',buttons=[],className='',close=true,onClose=null}){this.closeModal();const m=YL.$('#modal');YL.game.modalPaused=true;YL.audio.pause(true);m.hidden=false;m.innerHTML=`<section role="dialog" aria-modal="true" aria-labelledby="dialog-title" class="modal-sheet ${className}">${close?'<button class="modal-close" aria-label="关闭">×</button>':''}<p class="modal-kicker">${kicker}</p><h2 id="dialog-title" class="modal-title">${title}</h2><div class="modal-body">${body}</div><div class="modal-buttons"></div></section>`;const finish=v=>{this.closeModal(v);onClose?.(v);};YL.$('.modal-close',m)?.addEventListener('click',()=>finish());m.onclick=e=>{if(e.target===m&&close)finish();};m.onkeydown=e=>{if(e.key==='Escape'&&close)finish();if(e.key==='Tab'){const focusable=[...m.querySelectorAll('button:not([disabled]),a[href]')];const first=focusable[0],last=focusable.at(-1);if(e.shiftKey&&document.activeElement===first){e.preventDefault();last?.focus();}else if(!e.shiftKey&&document.activeElement===last){e.preventDefault();first?.focus();}}};for(const b of buttons){const n=document.createElement('button');n.className=b.secondary?'secondary':'primary';n.textContent=b.label;n.onclick=()=>{if(b.keep)b.action?.(n);else{finish(b.value);b.action?.();}};YL.$('.modal-buttons',m).append(n);}YL.$('button',m)?.focus({preventScroll:true});return new Promise(r=>this.modalResolve=r);},
+ card(key){const c=YL.cards[key];if(!c)return Promise.resolve();return this.modal({kicker:'文化知识'+(c.more?' · 可展开':''),title:c.title,body:`<p>${c.body}</p>${c.more?`<div class="modal-extra" hidden>${c.more}</div>`:''}`,className:'knowledge',buttons:[{label:c.more?'展开更多':'知道了',keep:true,action:n=>{const more=YL.$('.modal-extra');if(more?.hidden){more.hidden=false;n.textContent='知道了';YL.$('.modal-sheet')?.scrollTo({top:Math.max(0,more.offsetTop-16),behavior:'smooth'});}else this.closeModal();}}]}).then(()=>{});}
+};
+YL.narrate=function(step,scope){const text=YL.$('#narr-text'),narr=YL.$('#narration'),next=YL.$('#narr-next');let shown=0,finished=false,revealed=false;const reveal=()=>{next.hidden=false;if(!revealed){revealed=true;YL.game.showTags(step.tags||[],scope);}};const chars=Array.from(step.text);text.textContent='';next.hidden=true;YL.game.showTags([]);YL.game.setHint('');return scope.promise(done=>{let accum=0;const type=dt=>{accum+=dt;while(accum>=34&&shown<chars.length){accum-=34;shown++;text.textContent=chars.slice(0,shown).join('');}if(shown===chars.length){scope.pending.delete(type);reveal();}};scope.pending.add(type);scope.cleanup(()=>scope.pending.delete(type));const advance=()=>{if(YL.game.paused||finished)return;if(shown<chars.length){shown=chars.length;text.textContent=step.text;scope.pending.delete(type);reveal();return;}finished=true;scope.pending.delete(type);narr.onclick=null;next.onclick=null;YL.game.skipper=null;done();};narr.onclick=advance;next.onclick=e=>{e.stopPropagation();advance();};scope.cleanup(()=>{narr.onclick=null;next.onclick=null;});YL.game.skipper=()=>{shown=chars.length;text.textContent=step.text;advance();};});};
